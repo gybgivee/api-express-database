@@ -1,84 +1,115 @@
 const express = require('express')
 const router = express.Router()
 const db = require("../../db");
-
-
-const selectQuery = {
-    type: "SELECT *  FROM books WHERE type = $1",
-    topic: "SELECT *  FROM books WHERE topic = $1",
-    both: "SELECT *  FROM books WHERE type = $1 AND topic =$2"
+const book = {
+    title: "",
+    type: "",
+    author: "",
+    topic: "",
+    publicationDate: "",
+    pages: ""
 }
-const updateQuery = (queries) => {
+
+const getMappedQueryByJoin = (queries, joined) => {
     const keys = Object.keys(queries);
-    let update = "";
-    const params = [];
-    const length = keys.length;
-    for (let i = 0; i < length; i++) {
-        update += ` ${keys[i]} = $${i + 1}`;
-        if (i !== length - 1) update += ",";
-        params.push(queries[keys[i]]);
+    const mappedCols = keys.map((col, index) => {
+        return `${col} = $${index + 1}`
     }
-    return { update, params };
+    )
+    const query = mappedCols.join(`${joined}`);
+    return query;
 }
+const queryClause = (sql, queries) => {
+    if (!Object.keys(queries).length === 0) return sql;
+    const query = getMappedQueryByJoin(queries, " AND ");
 
-router.get("", async (req, res) => {
-    let query = "SELECT * FROM books ";
-    const params = [];//need to name params!!
-    const keys = Object.keys(req.query);
+    return `${sql} WHERE ${query}`;
+}
+const insertClause = (sql, insert, clause) => {
 
-    if (keys.length === 1) {
-        query = selectQuery[keys[0]];
-        params.push(req.query[keys[0]])
-    } else if (keys.length > 1) {
-        query = selectQuery.both;
-        params.push(req.query[keys[0]], req.query[keys[1]]);
-    }
+    const columnNames = Object.keys(insert).join(",");
+    const values = Object.values(insert).map(value => `'${value}'`).join(",");
+    return `${sql}(${columnNames}) SELECT ${values} WHERE NOT EXISTS (${clause}) RETURNING *;`;
 
-    const queryResult = await db.query(query, params);
-    console.log(queryResult);
-    res.status(200).json({ books: queryResult.rows });
-})
-router.get("/:id", async (req, res) => {
-    const { id } = req.params;
-    let query = "SELECT *  FROM books WHERE id = $1";
-    const params = [id];
-    const queryResult = await db.query(query, params);
-    res.status(200).json({ book: queryResult.rows });
-})
-router.post("", async (req, res) => {
-    const { title, type, author, topic, publicationDate, pages } = req.body;
-    if (!title || !type || !author || !topic || !publicationDate || pages===undefined|null) {
+}
+const deleteClause = (sql, clauses) => {
+    return `${sql} WHERE ${clauses} RETURNING *;`;
+}
+const updateClause = (sql, queries, clauses) => {
+    const setQuery = getMappedQueryByJoin(queries, ",");
+
+    return `${sql} SET ${setQuery} WHERE ${clauses} RETURNING *`
+
+}
+const checkNullRequest = (request, res) => {
+    const reqArray = Object.values(request);
+    //let result = result1.filter(o1 => result2.some(o2 => o1.id === o2.id));
+    const notNullList = Object.keys(book);
+    const isEqual = Object.keys(request).every((key, index) => key === notNullList[index]);
+    //console.log(isEqual);
+    if (!isEqual) {
         return res.status(400).json({
             error: "Missing fields in request body,Cannot be null"
         })
     }
-    const query =
-        `INSERT INTO books(title,type,author,topic,publicationDate,pages)
-        SELECT '${title}','${type}','${author}','${topic}','${publicationDate}',${pages}
-    WHERE NOT EXISTS (SELECT 1 FROM books WHERE title = '${title}') RETURNING *;`
-    const queryResult = await db.query(query);
+    return;
 
-    if (!queryResult.rows.length) {
-        return res.status(409).json({ eror: 'Title provided already exists' });
+}
+const checkDBStatus = (db, res) => {
+    if (!db.rows.length) {
+        if (db.command === "INSERT") {
+            return res.status(409).json({ eror: 'Title provided already exists' });
+        }
+        return res.status(404).json({ eror: 'id provided doest not exists' });
     }
+}
 
+router.get("", async (req, res) => {
+    const query = queryClause("SELECT * FROM books ", req.query);
+    const queryResult = await db.query(query, Object.values(req.query));
+    console.log(queryResult);
+    res.status(200).json({ books: queryResult.rows });
+})
+router.get("/:id", async (req, res) => {
+    const query = "SELECT *  FROM books WHERE id = $1";
+    const queryResult = await db.query(query, Object.values(req.params));
+    const isEror = checkDBStatus(queryResult, res);
+    if (isEror) return isEror;
+    res.status(200).json({ book: queryResult.rows });
+})
+router.post("", async (req, res) => {
+    const isNull = checkNullRequest(req.body, res);
+    if (isNull) return isNull;
+    //const insertClause = (sql,insert, clause) =
+    const query = insertClause("INSERT INTO books", req.body, `SELECT 1 FROM books WHERE title = '${req.body.title}'`)
+    /* const query =
+         `INSERT INTO books(title,type,author,topic,publicationDate,pages)
+         SELECT '${title}','${type}','${author}','${topic}','${publicationDate}',${pages}
+     WHERE NOT EXISTS (SELECT 1 FROM books WHERE title = '${title}') RETURNING *;`
+     */
+    const queryResult = await db.query(query);
+    const isEror = checkDBStatus(queryResult, res);
+    if (isEror) return isEror;
     res.status(201).json({ book: queryResult.rows })
 
 });
 router.patch("/:id", async (req, res) => {
-    const { id } = req.params;
-    const { update, params } = updateQuery(req.body);
-    const query = `UPDATE books SET ${update} WHERE books.id = ${id}  RETURNING *;`;
-    const queryResult = await db.query(query, params);
-    if (!queryResult.rows.length) return res.status(404).json({ eror: 'id provided doest not exists' });
+    const query = updateClause("UPDATE books", req.body, `id = ${req.params.id}`);
+    console.log({query});
+    //const query = `UPDATE books SET ${update} WHERE books.id = ${id}  RETURNING *;`;
+    const queryResult = await db.query(query, Object.values(req.body));
+    const isEror = checkDBStatus(queryResult, res);
+    if (isEror) return isEror;
     res.status(201).json({ book: queryResult.rows });
 
 })
 router.delete("/:id", async (req, res) => {
-    const { id } = req.params;
-    const query = `DELETE FROM books WHERE books.id = ${id} RETURNING *;`;
+
+    const query = deleteClause("DELETE FROM books", `id = ${req.params.id}`);
+    //const query = `DELETE FROM books WHERE books.id = ${id} RETURNING *;`;
     const queryResult = await db.query(query);
-    if (!queryResult.rows.length) return res.status(404).json({ eror: 'id provided doest not exists' });
+    const isEror = checkDBStatus(queryResult, res);
+    if (isEror) return isEror;
     res.status(201).json({ book: queryResult.rows });
 
 })
